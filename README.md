@@ -23,7 +23,7 @@ Train과 Val은 Random HDF5 파일의 서로 다른 구간에 들어갑니다. T
 
 | 채널 | 현재 구현 |
 |---|---|
-| TDL-A~E || CDL-A~E | NeoRadium 0.5.3 기반 기존 배치 구현 유지. 기존 출력과 bitwise 비교 통과 |
+| TDL, CDL-A~E | NeoRadium 0.5.3 기반 기존 배치 구현 유지. 기존 출력과 bitwise 비교 통과 |
 | COST2100 | 공식 5개 network의 환경 파라미터·VR·cluster·MPC·local cluster·이동·경로손실·LOS 계산을 Python으로 옮긴 **1 BS·1 MS 경로** |
 | QuaDRiGa | 공식 시나리오 파라미터, LSP/SOS, cluster delay/power/angle, scatterer, drifting, legacy/mmMAGIC subpath, GR, 추가 TOA 계산을 Python으로 옮긴 **고정 Tx·이동 Rx 단일 트랙 경로** |
 
