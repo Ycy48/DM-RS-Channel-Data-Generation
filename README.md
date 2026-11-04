@@ -1,5 +1,22 @@
 # Data_Generation_DMRS.ipynb
 
+최종 대조: **2026-11-04**. 같은 폴더의 현재 노트북 설정·생성 함수·저장 경로와 학습 파일의 로더/출력 코드를 기준으로 작성했습니다.
+
+## 현재 설정으로 실행하면
+
+현재 선택은 `DATA_MODE = 'Mix'`, `CHANNEL_TYPE_LIST = ['CDL-C']`입니다. **그대로 실행하면 CDL-C만 생성합니다.** COST2100·QuaDRiGa 설정이 셀에 있어도 `CHANNEL_TYPE_LIST`에서 선택하지 않으면 생성하지 않습니다.
+
+| 구분 | Delay (ns) | Doppler (Hz) | SNR (dB) | 생성 수량 |
+|---|---|---|---|---|
+| Mix Train/Val | 25, 75, 150, 200, 300 | 50, 200, 500 | 10, 15, 20 | 45개 조합에 Train 총 100,000 / Val 총 30,000 균등 배분 |
+| 환경별 Test | 25, 75, 150, 200, 300 | 50, 200, 500 | −10, −5, 0, 5, 10, 15, 20 | 105개 조합마다 Test 20,000 |
+
+Train과 Val은 Random HDF5 파일의 서로 다른 구간에 들어갑니다. Test는 환경별 파일로 저장합니다. 현재 Mix 전체는 **Train/Val 130,000 + Test 2,100,000 샘플**이며, LS/MMSE/Real 세 파일이 같은 샘플을 각각 표현합니다.
+
+기본 SISO·1슬롯·complex64에서 채널 배열만의 비압축 크기는 약 **25.51 GB**입니다. HDF5 메타데이터·임시 파일은 제외한 값이며 실제 파일 크기는 압축률에 따라 달라집니다. 같은 목록을 Fix로 생성하면 105개 환경마다 150,000개씩이므로 약 **180.18 GB**입니다.
+
+이 문서의 기본 수량은 현재 설정의 예시입니다. 실제 생성량은 노트북의 목록과 `TRAIN_SAMPLES`·`VAL_SAMPLES`·`TEST_SAMPLES`를 따릅니다.
+
 현재 파일은 표준 PDSCH DMRS를 만든 후 물리 채널에 파형을 통과시키고, 수신 RS에서 LS/Oracle LMMSE를 계산하여 Real과 함께 저장합니다. COST2100·QuaDRiGa 생성부는 외부 `.m` 실행기 없이 Python으로 연결했습니다.
 
 ## 구현 범위를 먼저 확인
@@ -35,11 +52,24 @@ TRAIN_SAMPLES = 100_000
 VAL_SAMPLES = 30_000
 TEST_SAMPLES = 20_000
 DATA_MODE = 'Mix'                    # 'Fix' 또는 'Mix'
-CHANNEL_TYPE_LIST = ['CDL-C']         # 현재 기본값 유지
+CHANNEL_TYPE_LIST = ['CDL-C']         # 이 목록에 선택된 채널만 생성
 # CHANNEL_TYPE_LIST = ['TDL-A','CDL-C']
 # CHANNEL_TYPE_LIST = ['COST2100']
 # CHANNEL_TYPE_LIST = ['QuaDRiGa']
 # CHANNEL_TYPE_LIST = ['COST2100','QuaDRiGa']
+# CHANNEL_TYPE_LIST = ['CDL-C','COST2100','QuaDRiGa']
+
+# Fix 전체 split / Mix 환경별 Test에 사용
+SNR_LIST_DB = [-10,-5,0,5,10,15,20]
+DELAY_SPREAD_LIST_NS = [25,75,150,200,300]
+DOPPLER_LIST_HZ = [50,200,500]
+
+# Mix Train/Val에 사용
+MIX_SNR_LIST = [10,15,20]
+MIX_DELAY_LIST_NS = [25,75,150,200,300]
+MIX_DOPPLER_LIST_HZ = [50,200,500]
+MIX_SEED = 42
+SEED = 20261021
 
 N_TX = 1
 N_RX = 1
@@ -52,11 +82,17 @@ NORMALIZE_AVERAGE_POWER = True
 DATA_ROOT = Path('E:/DMRS Channel')
 COMPUTE_DEVICE = 'cuda'               # cpu / cuda / auto
 GENERATION_BATCH_SIZE = 1000
+PATH_CHUNK_SIZE = 4
+COMPUTE_DTYPE = 'complex64'
+HDF5_COMPRESSION = 'lzf'
+SHOW_PROGRESS = True
 RESUME = True
 OVERWRITE = False
 ```
 
-TDL/CDL은 `CHANNEL_TYPE_LIST × Delay × Doppler × SNR` 조합을 사용합니다. `['TDL','CDL']`은 각 PROFILE_LIST의 A~E로 전개됩니다.
+TDL/CDL은 선택한 채널마다 `Delay × Doppler × SNR` 조합을 사용합니다. `['TDL','CDL']`은 `TDL_PROFILE_LIST`, `CDL_PROFILE_LIST`의 A~E로 전개됩니다.
+
+현재 구현은 **10 RB·15 kHz·Normal CP·DMRS 심볼 (2,11)**로 고정되어 있습니다. 첫 설정 셀의 값을 생성 직전에 다시 읽으며, 이 조건을 벗어나는 `N_RBS`·`SCS_KHZ`·`DMRS_SYMBOLS`는 검사에서 거부합니다. `CarrierSettings`의 기본값만 바꿔서 상단 설정과 다른 파형을 만들지 않습니다.
 
 COST2100·QuaDRiGa는 **선택 시나리오 × SNR**입니다. 기존 Delay/Doppler 리스트로 native 환경을 강제로 스케일하지 않습니다. 지연과 시간 변화는 native 시나리오·위치·속도에서 나옵니다.
 
@@ -70,17 +106,31 @@ COST2100_SCENARIO_LIST = ['IndoorHall_5GHz','SemiUrban_300MHz']
 COST2100_SETTINGS에서 각 network의 다음 값을 지정합니다.
 
 ```python
-'scenario': 'LOS',                 # 지원 profile에서만 NLOS 허용
-'link': 'Single',                  # 현재 port는 1 BS / 1 MS
-'band': 'Wideband',                # DMRS 파형 생성용
-'frequency_range_hz': [5.29e9,5.31e9],
-'bs_position_m': [10,10,0],
-'ms_position_m': [10,5,0],
-'ms_velocity_mps': [0,-0.1,0],
-'power_calibration_samples': 32,    # 생략 시 32
+COST2100_SETTINGS['IndoorHall_5GHz'] = {
+    'scenario': 'LOS',              # 지원 profile에서만 NLOS 허용
+    'link': 'Single',               # 현재 port는 1 BS / 1 MS
+    'band': 'Wideband',             # DMRS 파형 생성용
+    'frequency_range_hz': [5.29e9,5.31e9],
+    'bs_position_m': [10,10,0],
+    'ms_position_m': [10,5,0],
+    'ms_velocity_mps': [0,-0.1,0],
+    'power_calibration_samples': 32, # 생략 시 32
+}
 ```
 
-공식 network는 IndoorHall_5GHz, SemiUrban_300MHz, Indoor_CloselySpacedUser_2_6GHz, SemiUrban_CloselySpacedUser_2_6GHz, SemiUrban_VLA_2_6GHz입니다. Indoor 두 종류는 공식 파라미터상 LOS만 지원하고, SemiUrban 세 종류는 LOS/NLOS를 선택할 수 있습니다. 설정의 주파수·위치 예시는 공식 demo를 기준으로 했으며, 예제 값이 공식 허용 범위 전체를 의미하지는 않습니다.
+현재 생성 경로가 지원하는 조합은 다음 8개입니다. 노트북에 적힌 기본 COST 시나리오는 `IndoorHall_5GHz` 하나입니다.
+
+| Network 이름 | 지원 설정 |
+|---|---|
+| `IndoorHall_5GHz` | LOS |
+| `SemiUrban_300MHz` | LOS / NLOS |
+| `Indoor_CloselySpacedUser_2_6GHz` | LOS |
+| `SemiUrban_CloselySpacedUser_2_6GHz` | LOS / NLOS |
+| `SemiUrban_VLA_2_6GHz` | LOS / NLOS |
+
+각 항목의 `COST2100_SETTINGS[network]['scenario']`를 선택합니다. 현재 DMRS 어댑터에는 **`link='Single'`, `band='Wideband'`**를 사용해야 합니다. 한 network를 여러 번 적는 중복 목록은 허용하지 않습니다.
+
+설정의 주파수·위치 예시는 공식 demo를 기준으로 했으며, 예제 값이 공식 허용 범위 전체를 의미하지는 않습니다. `frequency_range_hz`의 중심이 native carrier가 되고, NR 파형의 활성 대역폭은 10 RB × 12 × 15 kHz = 1.8 MHz입니다. 두 값을 같은 대역폭 설정으로 혼동하지 않습니다.
 
 COST omni 배열 응답은 공식 SISO/2×2 식을 사용하므로 현재 Tx/Rx 각각 최대 2입니다. VLA profile은 BS-VR 통계를 적용하되 이 실험에서는 한 BS 위치의 omni 링크를 생성합니다. 공식 128개 큰 배열 전체를 출력하는 기능과 구분합니다.
 
@@ -104,9 +154,9 @@ QUADRIGA_SCENARIO_SETTINGS = {
 }
 ```
 
-共通 설정 위에 시나리오별 QUADRIGA_SCENARIO_SETTINGS가 덮어써집니다. 방향은 속도 벡터 xyz 성분으로 정합니다. 현재 안테나는 수직 편파 omni element와 반파장 간격 ULA입니다. 물리 Rx/Tx 위치를 사용해 배열별 거리·위상·지연을 계산합니다.
+공통 `QUADRIGA_SETTINGS` 위에 선택한 시나리오의 `QUADRIGA_SCENARIO_SETTINGS`가 덮어써집니다. 방향은 속도 벡터 xyz 성분으로 정합니다. 현재 안테나는 수직 편파 omni element와 반파장 간격 ULA입니다. 물리 Rx/Tx 위치를 사용해 배열별 거리·위상·지연을 계산합니다.
 
-공식 91개 config의 시나리오·pathloss 테이블을 사용합니다. 91개 이름 모두에 대한 작은 수치 생성 smoke check는 수행했지만, 그것이 각 시나리오의 실제 적용 범위·모든 geometry·통계·MATLAB 동등성을 검증했다는 뜻은 아닙니다. 예를 들어 UMi 설정의 Tx 높이를 위성 시나리오에 그대로 사용하는 것은 의미 있는 위성 실험이 아닙니다. 해당 환경의 실제 위치·주파수·이동 설정을 별도로 지정해야 합니다.
+현재 기본 선택은 `QUADRIGA_SCENARIO_LIST = ['3GPP_38.901_UMi_NLOS']`입니다. 선택 가능한 공식 이름은 노트북의 `QUADRIGA_OFFICIAL_SCENARIOS`에서 확인합니다. 공식 91개 config의 시나리오·pathloss 테이블을 사용합니다. 91개 이름 모두에 대한 작은 수치 생성 smoke check는 수행했지만, 그것이 각 시나리오의 실제 적용 범위·모든 geometry·통계·MATLAB 동등성을 검증했다는 뜻은 아닙니다. 예를 들어 UMi 설정의 Tx 높이를 위성 시나리오에 그대로 사용하는 것은 의미 있는 위성 실험이 아닙니다. 해당 환경의 실제 위치·주파수·이동 설정을 별도로 지정해야 합니다.
 
 O2I는 `o2i_loss_db`, `indoor_distance_m`을 명시해야 합니다. 누락 시 일반 outdoor로 대체하지 않고 오류를 냅니다. 위성 orbital mobility와 track-segment 전환은 구현되지 않았습니다. 현재 이동은 지정한 3차원 선형 속도입니다.
 
@@ -114,9 +164,24 @@ O2I는 `o2i_loss_db`, `indoor_distance_m`을 명시해야 합니다. 누락 시 
 
 ## Fix / Mix
 
+두 모드 모두 `CHANNEL_TYPE_LIST`의 선택 항목을 순차적으로 생성합니다. 여러 family를 선택한 Mix에서는 그 항목들을 합친 **전체 조합 수 N**을 기준으로 Train/Val 수량을 배분합니다. 예를 들어 COST network 하나와 QuaDRiGa 시나리오 하나, Mix SNR 세 개를 선택하면 N=6입니다. native 환경에는 TDL/CDL Delay·Doppler 목록을 추가 곱하지 않습니다.
+
 - Fix: 선택한 환경마다 Train 10만 / Val 3만 / Test 2만. 파일 안의 순서는 Train→Val→Test.
 - Mix: 선택한 조합 N개에 전체 Train 10만 / Val 3만을 균등 배분합니다. 환경별 Train/Val 원본 파일을 만들지 않고 직접 생성한 후 split별로 섞습니다. 각 환경의 Test 2만은 따로 저장합니다.
-- LS/MMSE/Real에는 같은 Source_Index / Source_Row / Split_Index와 순열을 사용합니다. 슬롯은 한 샘플 안에서 함께 이동합니다.
+- Random Mix의 LS/MMSE/Real에는 같은 `Source_Index` / `Source_Row` / `Split_Index`와 순열을 사용합니다. 슬롯은 한 샘플 안에서 함께 이동합니다.
+
+환경마다 `총수 // N`을 기본으로 할당하고 나머지를 배분하므로, 같은 split에서 환경별 수량 차이는 최대 1개입니다. Train과 Val은 각각 따로 섞으며 LS/MMSE/Real의 Pair는 함께 이동합니다.
+
+| Random Mix 데이터셋 | 의미 |
+|---|---|
+| `Source_Index` | `Sources_JSON[index]['condition']`에 연결되는 환경 번호 |
+| `Source_Row` | 그 환경의 물리 샘플 난수 번호. 외부 원본 파일을 읽으라는 행 번호가 아님 |
+| `Split_Index` | 0=Train, 1=Val. 현재 Random Mix에는 Test 행이 없음 |
+| `Sources_JSON`, `Metadata_JSON` | 환경 목록·설정·수량·quota·구현 ID·난수 seed |
+
+기본 물리 샘플 번호는 Train `[0,100000)`, Val `[100000,130000)`, Test `[130000,150000)`입니다. Mix는 각 환경에서 필요한 번호만 선택해 직접 생성하고, 환경별 Test는 Test 번호 구간을 사용합니다. 실제 구간은 설정 수량에 따라 계산됩니다. 같은 환경의 Train/Val/Test 번호가 겹치지 않으며, SNR만 바꿔 비교할 때는 동일 번호의 채널·송신 데이터·기저 잡음 난수를 공유하도록 설계되어 있습니다.
+
+이 인덱스 덕분에 섞인 Mix에서도 환경별 Train/Validation Loss를 집계할 수 있습니다. 환경 표시는 모델 입력에 추가되는 값이 아닙니다.
 
 TDL/CDL의 Mix Train/Val은 MIX_DELAY_LIST_NS / MIX_DOPPLER_LIST_HZ / MIX_SNR_LIST를 사용합니다. native 두 종류는 COST2100_SCENARIO_LIST / QUADRIGA_SCENARIO_LIST와 MIX_SNR_LIST를 사용합니다. 평가 SNR은 일반 SNR_LIST_DB입니다.
 
@@ -124,7 +189,7 @@ TDL/CDL의 Mix Train/Val은 MIX_DELAY_LIST_NS / MIX_DOPPLER_LIST_HZ / MIX_SNR_LI
 
 0-based 인덱스입니다. 15 kHz Normal CP, 14 symbols/slot, 슬롯 길이 1 ms입니다. Type-1 mapping A, single-symbol DMRS, first position 2, additional position 1로 심볼 2·11에 RS를 넣습니다. SISO RS 위치는 0,2,…,118이며 두 심볼의 위치는 같고 시퀀스 값은 다릅니다.
 
-데이터는 심볼 3~10, RS의 첫·마지막 사이인 SC 0~118에 배치합니다. 이는 표준 DMRS에 이 실험의 데이터 영역 제한을 적용한 것입니다.
+데이터는 심볼 3~10, RS의 첫·마지막 사이인 SC 0~118에 배치합니다. 이는 표준 DMRS에 이 실험의 데이터 영역 제한을 적용한 것입니다. CSI-RS는 생성하지 않습니다. HDF5에는 채널과 배치·난수·환경 메타데이터를 저장하며 송수신 파형이나 QAM bit 배열 자체를 저장하지는 않습니다.
 
 | 값 | SISO / 1 slot 실제 HDF5 shape |
 |---|---|
@@ -140,7 +205,9 @@ INTERP=True이면 LS/MMSE만 RS 경계 안에서 119×10의 2D 선형 보간 결
 
 SISO/SIMO는 RS별 Y/X이고 FD-CDM 묶음 평균을 하지 않습니다. 여러 Tx 포트는 표준 FD-CDM pilot matrix로 분리합니다. Tx=3·4일 때 포트별 짝/홀수 SC가 달라 공통 Data 구간은 118×8, Real 저장 범위는 120×10이 됩니다. COST 현재 omni 매핑은 Tx/Rx 최대 2만 허용합니다.
 
-N_SLOTS=5면 슬롯 축이 5이며, 한 행 안에서 동일한 실현의 이동과 FIR 이력이 이어집니다. 파일의 다음 행까지 시간 연속이라는 뜻은 아닙니다.
+`N_SLOTS=5`면 LS/MMSE는 `N×5×1×1×60×2`, Real은 `N×5×1×1×119×10`입니다. 한 행 안에서 동일한 실현의 이동과 FIR 이력이 슬롯 경계를 넘어 이어집니다. 파일의 다음 행은 독립 샘플이며, 행 사이까지 연속인 것은 아닙니다.
+
+슬롯 수를 늘려도 환경 조합이 같으면 최종 LS/MMSE/Real 파일 개수는 같고 슬롯 축이 늘어납니다. 비압축 배열 원소 수는 슬롯 수에 비례하지만 압축 후 파일 크기가 정확히 그 배수가 되지는 않을 수 있습니다. `Slot_Indices`, `Slot_Start_Times_s`, `Symbol_FFT_Start_Times_s`에 슬롯 번호와 실제 시간 좌표를 저장합니다.
 
 ## 물리 채널의 시간 처리와 SRS 원본의 차이
 
@@ -149,6 +216,22 @@ SRS `Data_Generation_TDL_Integrated copy.ipynb`는 심볼마다 새 탭을 만�
 현재 DMRS TDL/CDL은 ray/SOS 채널을 anchor에서 계산한 뒤 시간 샘플의 복소 경로 이득을 선형으로 연결합니다. **SRS에서 복사한 방식이 아니라 DMRS 구현에 추가된 방식**입니다. NeoRadium 원래 applyToSignal의 심볼별 고정 방식과도 차이가 있습니다. 이 부분은 native 생성기 추가 작업에서 바꾸지 않았습니다.
 
 native 두 종류는 시간에 따른 경로 계수와 지연으로 fractional-delay FIR을 만들고, FIR anchor 사이를 보간하며 이전 심볼·슬롯의 송신 파형까지 포함하여 선형 컨볼루션합니다. 이 시간 처리는 RS 추정 후의 INTERP 2D 보간과 별개입니다.
+
+## CPU/GPU와 실제 배치 크기
+
+TDL/CDL은 NeoRadium의 설정·안테나·ray/SOS 계수를 준비한 뒤 배치 커널과 CP-OFDM/FIR/FFT/추정을 `COMPUTE_DEVICE`에 맞춰 실행합니다. native COST2100·QuaDRiGa의 확률·기하 생성은 CPU이고, 이후 파형/추정은 PyTorch CPU 또는 CUDA입니다.
+
+현재 실제 생성 배치는 다음 규칙입니다.
+
+```text
+scale = N_SLOTS × N_TX × N_RX
+divisor = scale 이상인 가장 작은 2의 거듭제곱
+effective_batch_size = max(1, GENERATION_BATCH_SIZE // divisor)
+```
+
+기준 배치 1000일 때 SISO·1슬롯은 1000, SISO·5슬롯은 `1000 // 8 = 125`, 2×2 MIMO·1슬롯은 250입니다. 여기서 8은 채널 tap 수가 아니라 슬롯·안테나 크기에 대한 배치 축소 계수입니다. **여유 VRAM을 실시간으로 측정해서 최적 배치를 찾는 기능은 없습니다.** 메모리가 부족하면 `GENERATION_BATCH_SIZE`를 줄입니다. TDL/CDL의 FIR 경로 분할에는 `PATH_CHUNK_SIZE`도 적용되지만 native CIR 경로의 같은 메모리 조절 값은 아닙니다. 배치를 늘려도 CPU native 생성이 병목이면 같은 비율로 빨라지지 않습니다.
+
+`SHOW_PROGRESS=True`는 생성/셔플 진행 bar를 표시합니다. 학습 파일에서 학습 bar만 남기도록 바꾼 것과 별개로 Data Generation의 생성 진행률은 유지됩니다.
 
 ## 전력·SNR·지연 해석
 
@@ -160,6 +243,29 @@ SNR은 Tx EPRE 대비 FFT 이후 복소 AWGN 분산 기준이며 실측 수신 S
 
 ## 저장 경로
 
+기본 SISO·1슬롯의 환경별 파일 예시는 다음과 같습니다. Fix로 바꾸면 중간 모드 폴더가 `Fix`가 되고, 내용에 Train/Val/Test가 모두 들어갑니다.
+
+```text
+E:/DMRS Channel/SISO/Mix/CDL-C/LS/
+  DMRS SC60xSym2 P1 nslot1 Comb2 RB0-9 l2,11/
+    LS Channel 2D 0dB (Delay 1.5e-07, Slot 0, Doppler 50Hz, Tx1 Rx1 L1, BWP120).h5
+```
+
+MMSE/Real은 각각 `MMSE`, `Real` 폴더와 같은 종류의 파일명을 사용합니다. 5슬롯은 allocation에 `nslot5`, 실제 파일명에 `Slot 0-4`가 들어갑니다. `P1`은 포트 1개이며 슬롯 수가 아닙니다.
+
+Random Mix 예시:
+
+```text
+E:/DMRS Channel/SISO/Mix/CDL-C/Random LS Channel/
+  DMRS SC60xSym2 P1 nslot1 Comb2 RB0-9 l2,11/
+    Random LS Channel 2D (DMRS SC60xSym2 P1 nslot1 Comb2 RB0-9 l2,11).h5
+    Random Channel Config.txt
+```
+
+여러 채널/프로파일을 한 Mix로 섞으면 `CDL-C` 자리는 `Mixed`입니다. 단일 COST2100 family만 선택하면 `COST2100`, 단일 QuaDRiGa family만 선택하면 `QuaDRiGa`입니다. 세 수량의 폴더명은 `Random LS Channel`, `Random MMSE Channel`, `Random Real Channel`입니다. `INTERP=True`일 때는 별도의 `Interp2D` 이름으로 저장합니다.
+
+전체 구분:
+
 ```text
 E:/DMRS Channel/SISO/Fix 또는 Mix/
   CDL-C 또는 TDL-A/LS|MMSE|Real/<DMRS allocation>/<기존 환경 파일명>.h5
@@ -168,15 +274,57 @@ E:/DMRS Channel/SISO/Fix 또는 Mix/
   <단일 family 또는 Mixed>/Random LS|MMSE|Real Channel/<allocation>/<Random 파일>.h5
 ```
 
-native 환경에 TDL/CDL의 Delay/Doppler 숫자를 임의로 붙이지 않습니다. `condition_json`, `native_source_json`, Mix config에 시나리오·주파수·위치·속도·구현 hash·소스 버전을 저장합니다. 설정이 다르면 Config hash가 달라집니다.
+native 환경에 TDL/CDL의 Delay/Doppler 숫자를 임의로 붙이지 않습니다. 환경별 파일은 `condition_json`, `native_source_json`에 시나리오·주파수·위치·속도·구현 hash·소스 버전을 기록합니다. Random Mix의 각 환경은 `Source_Index`로 `Sources_JSON`·`Metadata_JSON`의 조건에 연결하고, `Random Channel Config.txt`에서도 목록을 확인합니다. native 설정이 다르면 환경별 파일명의 Config hash가 달라집니다.
 
 allocation의 P1은 포트 수이고 nslot1은 슬롯 수입니다. 여러 슬롯은 `nslot5`, `Slot 0-4` 형식입니다. CDM은 상위 경로 대신 속성에 기록합니다.
 
-완료된 기존 TDL/CDL 파일은 bitwise 회귀 검사한 이전 구현에 한해 호환 재사용합니다. OVERWRITE=False에서 다른 설정의 데이터를 자동으로 덮어쓰지 않습니다. 실제 데이터·학습 결과를 수정 작업에서 이동·삭제하지 않았습니다.
+`RESUME=True`, `OVERWRITE=False`가 기본입니다.
 
-## 학습 파일과 Result
+- 완료된 같은 설정의 LS/MMSE/Real 세트는 재계산하지 않고 재사용합니다. 허용된 이전 TDL/CDL 구현 ID도 호환 검사를 거칩니다.
+- 생성이 중단되면 세 수량이 공통으로 기록 완료한 행부터 재개합니다. 일부 파일만 있거나 설정이 다르면 임의로 이어 붙이지 않습니다.
+- 직접 Mix는 `.work.h5`, `.shuffle.h5` 임시 파일을 거칩니다. 중단 후 재개할 수 있도록 생성 중에는 이 파일을 보존합니다. 완료 후 최종 세트와 설정·Pair를 검사하고 작업 파일을 정리합니다.
+- 같은 경로에 다른 Mix 설정이 있으면 `OVERWRITE=False`에서 오류가 납니다. 기존 데이터를 보존할 실험은 별도 `DATA_ROOT`를 사용합니다. `OVERWRITE=True`는 의도적인 재생성에만 사용합니다.
+- 파일 크기만으로 완료 여부를 판단하지 않습니다. `status='complete'`, `num_written`, split 범위, `generation_id`와 LS/MMSE/Real의 Pair를 확인합니다. LZF 압축률은 LS/MMSE/Real마다 다를 수 있습니다.
 
-기존 5개 학습 로더의 TDL/CDL Fix/Mix 경로는 유지됩니다. **native scenario 이름·환경 키를 사용하는 학습/Result 자동 검색·Plot까지 이번 생성기 이식으로 검증한 것은 아닙니다.** 현재 native 검증 범위는 데이터 생성과 저장·재로딩입니다. 기존 Delay×Doppler 형태로 native 환경을 오표시하지 않도록 구분해서 연결해야 합니다.
+## 학습 파일과 Result 연결
+
+현재 DNN·ELM·ELM_Linear·ELM_Distillation·Transformer는 TDL/CDL의 SISO Fix/Mix 데이터에 연결되어 있습니다. 모델 구조 설명은 [Layout_Guide.md](Layout_Guide.md)를 참고합니다.
+
+| Data Generation 설정 | 학습 파일에서 맞출 설정 |
+|---|---|
+| `DATA_ROOT` | `DATA_ROOT` |
+| SISO | `DATA_BRANCH = 'SISO'` |
+| `DATA_MODE = 'Mix'` | `MIXED = True` |
+| CDL-C 하나로 만든 Random Mix | `MIX_CHANNEL_TYPE = 'CDL-C'` |
+| 여러 채널/프로파일을 함께 만든 Random Mix | `MIX_CHANNEL_TYPE = 'Mixed'` |
+| 환경별 Test 생성 목록 | `TEST_CHANNEL_TYPE_LIST`, `TEST_DELAY_LIST`, `TEST_DOPPLER_LIST`, `TEST_SNR_LIST` |
+
+Mix 학습의 Train/Val 환경·수량·순서는 실제 Random 파일의 메타데이터를 따릅니다. 학습 파일의 `TRAIN_*_LIST`는 `MIXED=False`일 때 개별 Fix 학습을 선택하는 목록입니다. Test는 별도 설정 목록의 환경별 Test 파일로 평가합니다. 따라서 Mix Train SNR이 10·15·20 dB이고 Test SNR이 −10~20 dB인 현재 설정은 의도적인 서로 다른 목록입니다.
+
+생성 데이터에는 항상 심볼 2·11이 모두 있습니다. 학습 파일의 `COMMON_CONFIG['current_symbols']`에서 `[2]`, `[11]`, `[2,11]` 중 관측 입력을 선택합니다. 예를 들어 현재 `[2]` 모델은 기존 `60×2` 파일에서 `60×1`만 읽습니다. 이를 위해 데이터를 다시 생성할 필요는 없습니다. 생성기의 여러 슬롯 지원과 현재 학습 파일의 1슬롯 실험 설정도 구분합니다.
+
+**COST2100·QuaDRiGa는 생성·파형·추정·저장 경로까지만 연결되어 있습니다. 현재 학습/Result의 환경 검색은 TDL/CDL의 Delay·Doppler 키를 요구하므로 native 시나리오 자동 학습·Test·Plot까지 지원하는 상태는 아닙니다.** native 환경의 Scene/Config 키를 처리하도록 로더와 Result를 연결한 뒤 사용해야 합니다. 생성기에서 두 family를 선택하는 것만으로 학습 파일까지 자동 전환되지는 않습니다.
+
+학습 결과는 데이터 경로와 별도로 다음 구조를 사용합니다. Data 격자는 실제로 모델에서 선택한 RS 심볼 수를 반영하며, 데이터 allocation의 `P1` 표기는 이 결과 격자에 넣지 않습니다.
+
+```text
+CE_Result/Mix/<채널>/<RS 격자_Data 격자_BWP120>/<모델>/<Layout>/
+  Model/<모델 설정·Mix ID>/Model.pth
+  Model/<모델 설정·Mix ID>/Losses.json
+  Model/<모델 설정·Mix ID>/Environment_Loss/<CE 또는 Data 학습 단계>/
+  Channel/<모델 설정·Mix ID>/CE_Train.h5
+  Channel/<모델 설정·Mix ID>/Data_Train.h5       # Distillation=True일 때
+  NMSE/<Test 환경>/<SNR·모델 설정>/...
+  Comparison/<모델 설정>/...
+```
+
+LS 입력은 별도 CE 모델과 CE Train 저장을 생략합니다. 현재 학습 출력은 모델 학습 tqdm만 표시하며, Layout 평가 후 CE/Data 환경 격자 그림과 SNR별 `CE / Data` 표를 모아 출력합니다. LS 입력의 CE 그림은 생략하고 표의 CE는 `x`로 표시합니다. 학습 출력 설정은 생성기의 진행 bar와 별개입니다.
+
+새 학습의 `Environment_Loss`는 Random 파일의 환경 번호로 Train/Val을 따로 집계합니다. DNN/Transformer는 epoch별, ELM 계열은 Ridge 후보별입니다. `History.csv`를 매 단계마다 누적하고, 학습 단계 종료 후 `By_Environment`·`By_Doppler` CSV/PNG와 전체 요약을 저장합니다. 각 CSV에는 Train/Val MSE·샘플 수·전체 Loss 기여율이 있습니다. 역전파·Early Stopping·Ridge 선택에는 기존 전체 Mix Loss를 사용합니다.
+
+Teacher 중간 정답이 Train에만 있는 Distillation 단계의 Val Loss는 공란입니다. 이미 가중치를 불러 Test만 하는 실행에서는 과거 epoch별 Loss를 새로 만들지 않습니다. 원본 Mix가 그대로 있고 가중치가 저장되어 있으면 최종 모델의 환경별 Train/Val MSE는 별도 재평가가 가능하지만, 기록하지 않은 과거 epoch별 값은 복원할 수 없습니다.
+
+Loss CSV 기록과 가중치 저장 시점은 별개입니다. 현재 학습 코드는 CE 완료와 Data 전체 학습 완료 시 `Model.pth`를 저장합니다. 여러 Data head 중 일부가 완료되어도 전체 Data 학습이 끝나기 전까지 최신 Data 가중치가 파일에 저장된 것은 아닙니다.
 
 ## 파일·검사·출처
 
@@ -188,7 +336,9 @@ native Python 구현·검사·backup·vendor는 `DMRS_CSI_Compression/GPT Output
 - 경로손실·프로파일 상수·DS 스케일링·scatterer 기하 제약·정지/이동·MIMO/여러 슬롯·CPU/CUDA 검사.
 - 91개 공식 QuaDRiGa config 테이블 일치 및 작은 생성 smoke census. **공식 모델 전체 적합성 검증이나 MATLAB 출력 대조를 대신하지 않습니다.**
 
-대량 E 드라이브 데이터 생성과 모델 학습은 실행하지 않았습니다. 검증에는 GPT Output 아래의 작은 별도 데이터를 사용했습니다.
+위 생성기 검사는 2026-11-03에 수행한 소형 독립 검사 기록입니다. 2026-11-04 현재 노트북과 그 검증본을 비교했으며 실행 AST가 같습니다. 이번 문서 갱신에서는 대량 데이터 생성이나 모델 학습을 실행하지 않았습니다. 기존 E 드라이브 데이터의 완료 상태는 각 HDF5의 상태 속성과 메타데이터로 확인합니다.
+
+환경별 학습 Loss 기록과 출력 형식의 수정·검사 자료는 각각 `GPT Output/environment_loss_20261104`, `GPT Output/training_output_20261104`에 있습니다. 이 기능들은 학습 노트북 안에 포함되어 있어 검사 스크립트를 학습 중에 import하지 않습니다.
 
 공식 소스:
 
